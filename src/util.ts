@@ -1,3 +1,5 @@
+import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
+
 export const CURSOR_API_BASE = "https://api.cursor.com";
 
 export const DEFAULT_DELIVERY_RULES = `【交付规则】所有需要交付给用户的文件,必须保存到系统目录 /opt/cursor/artifacts/(不是工作目录,也不是相对路径),文件名使用英文或拼音,避免空格。如需 Python 库请自行 pip 安装。完成后列出该目录内容。`;
@@ -9,13 +11,12 @@ export const CLOUD_AGENT_SAFETY_NOTICE =
   "该 Cloud Agent 在远端拥有 shell 与浏览器能力。涉及删除文件、发送邮件、使用已登录账号、付款等操作,必须先获得用户明确确认后再下发指令。";
 
 export function secureCompare(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const aBytes = encoder.encode(a);
-  const bBytes = encoder.encode(b);
-  if (aBytes.byteLength !== bBytes.byteLength) {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) {
     return false;
   }
-  return crypto.subtle.timingSafeEqual(aBytes, bBytes);
+  return nodeTimingSafeEqual(aBuf, bBuf);
 }
 
 export function parseBearerToken(request: Request): string | null {

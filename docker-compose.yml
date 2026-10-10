@@ -1,9 +1,13 @@
 services:
   cursor-mcp-bridge:
     build: .
+    container_name: cursor-mcp-bridge
     restart: unless-stopped
     ports:
-      - "${PORT:-8792}:8792"
+      - "127.0.0.1:${PORT:-8792}:8792"
+    networks:
+      - default
+      - more-stack
     environment:
       PORT: "8792"
       BRIDGE_TOKEN: ${BRIDGE_TOKEN:?set BRIDGE_TOKEN in .env}
@@ -11,3 +15,8 @@ services:
       CREATE_AGENT_RATE_LIMIT_PER_MINUTE: ${CREATE_AGENT_RATE_LIMIT_PER_MINUTE:-5}
       CURSOR_REQUEST_TIMEOUT_MS: ${CURSOR_REQUEST_TIMEOUT_MS:-30000}
       DELIVERY_RULES: ${DELIVERY_RULES:-}
+
+networks:
+  more-stack:
+    external: true
+    name: more-stack_default
