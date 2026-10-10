@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { CursorApiError, CursorClient, cursorErrorPayload } from "./cursor-api";
+import { CursorApiError, CursorClient, cursorErrorPayload } from "./cursor-api.js";
 import {
   CLOUD_AGENT_SAFETY_NOTICE,
   UNTRUSTED_CONTENT_NOTICE,
@@ -12,7 +12,7 @@ import {
   normalizeArtifactPath,
   prependDeliveryRules,
   sleep,
-} from "./util";
+} from "./util.js";
 
 const imageSchema = z.union([
   z.object({ url: z.string().url() }),

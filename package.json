@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:node": "tsx watch --env-file=.env src/node-server.ts",
     "deploy": "wrangler deploy",
+    "build:node": "tsc -p tsconfig.build.json",
+    "start:node": "node --env-file=.env dist/node-server.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -15,6 +18,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260729.1",
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
     "typescript": "^6.0.3",
     "wrangler": "^4.145.0"
   }

@@ -93,16 +93,28 @@ export async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function checkCreateAgentRateLimit(env: Env): Promise<{
-  allowed: boolean;
-  limit: number;
-  note?: string;
-}> {
-  const limit = Math.max(
+const memoryRateBuckets = new Map<string, number>();
+
+function parseCreateRateLimit(env: Env): number {
+  return Math.max(
     1,
     parseInt(env.CREATE_AGENT_RATE_LIMIT_PER_MINUTE ?? "5", 10) || 5,
   );
-  const minuteBucket = Math.floor(Date.now() / 60_000);
+}
+
+function rateLimitDenied(limit: number) {
+  return {
+    allowed: false as const,
+    limit,
+    note: "已触发每分钟创建 Agent 上限。可在 Cursor 控制台设置用量上限,或稍后重试。",
+  };
+}
+
+async function checkCreateAgentRateLimitViaCache(
+  env: Env,
+  limit: number,
+  minuteBucket: number,
+): Promise<{ allowed: boolean; limit: number; note?: string }> {
   const cacheKey = new Request(
     `https://cursor-mcp-bridge.internal/rate/create-agent/${minuteBucket}`,
   );
@@ -114,11 +126,7 @@ export async function checkCreateAgentRateLimit(env: Env): Promise<{
     count = parseInt(text, 10) || 0;
   }
   if (count >= limit) {
-    return {
-      allowed: false,
-      limit,
-      note: "已触发每分钟创建 Agent 上限。可在 Cursor 控制台设置用量上限,或稍后重试。",
-    };
+    return rateLimitDenied(limit);
   }
   count += 1;
   await cache.put(
@@ -129,4 +137,40 @@ export async function checkCreateAgentRateLimit(env: Env): Promise<{
     }),
   );
   return { allowed: true, limit };
+}
+
+function checkCreateAgentRateLimitViaMemory(
+  limit: number,
+  minuteBucket: number,
+): { allowed: boolean; limit: number; note?: string } {
+  const key = String(minuteBucket);
+  const count = memoryRateBuckets.get(key) ?? 0;
+  if (count >= limit) {
+    return rateLimitDenied(limit);
+  }
+  memoryRateBuckets.set(key, count + 1);
+  if (memoryRateBuckets.size > 8) {
+    const stale = String(minuteBucket - 5);
+    memoryRateBuckets.delete(stale);
+  }
+  return { allowed: true, limit };
+}
+
+export async function checkCreateAgentRateLimit(env: Env): Promise<{
+  allowed: boolean;
+  limit: number;
+  note?: string;
+}> {
+  const limit = parseCreateRateLimit(env);
+  const minuteBucket = Math.floor(Date.now() / 60_000);
+
+  if (typeof caches !== "undefined" && typeof caches.default?.match === "function") {
+    try {
+      return await checkCreateAgentRateLimitViaCache(env, limit, minuteBucket);
+    } catch {
+      return checkCreateAgentRateLimitViaMemory(limit, minuteBucket);
+    }
+  }
+
+  return checkCreateAgentRateLimitViaMemory(limit, minuteBucket);
 }

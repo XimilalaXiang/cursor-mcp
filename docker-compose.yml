@@ -1,0 +1,13 @@
+services:
+  cursor-mcp-bridge:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8792}:8792"
+    environment:
+      PORT: "8792"
+      BRIDGE_TOKEN: ${BRIDGE_TOKEN:?set BRIDGE_TOKEN in .env}
+      CURSOR_API_KEY: ${CURSOR_API_KEY:?set CURSOR_API_KEY in .env}
+      CREATE_AGENT_RATE_LIMIT_PER_MINUTE: ${CREATE_AGENT_RATE_LIMIT_PER_MINUTE:-5}
+      CURSOR_REQUEST_TIMEOUT_MS: ${CURSOR_REQUEST_TIMEOUT_MS:-30000}
+      DELIVERY_RULES: ${DELIVERY_RULES:-}

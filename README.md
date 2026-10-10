@@ -1,8 +1,15 @@
 # Cursor Cloud Agents MCP Bridge
 
-部署在 Cloudflare Workers 上的远程 MCP 服务,将 [Cursor Cloud Agents API v1](https://cursor.com/docs/cloud-agent/api/endpoints) 封装为 MCP 工具,便于在 claude.ai 等客户端中创建与指挥**无仓库(no-repo)** Cloud Agent(研究、文档、PDF/Word/Excel、数据分析等)。
+将 [Cursor Cloud Agents API v1](https://cursor.com/docs/cloud-agent/api/endpoints) 封装为 MCP 工具,便于在 claude.ai 等客户端中创建与指挥**无仓库(no-repo)** Cloud Agent(研究、文档、PDF/Word/Excel、数据分析等)。
 
-MCP 端点路径:`/mcp`(Streamable HTTP,由 Agents SDK `createMcpHandler()` 提供)。
+支持两种运行方式:
+
+| 方式 | 适用场景 |
+| --- | --- |
+| **Cloudflare Workers** | 免运维、全球边缘 |
+| **Docker / VPS** | 自建服务器、内网或固定 IP |
+
+MCP 端点路径均为 **`/mcp`**(Streamable HTTP,Agents SDK `createMcpHandler()`)。
 
 ## 前置条件
 
@@ -34,7 +41,57 @@ npx @modelcontextprotocol/inspector@latest
 2. 在 **Headers** 中添加:`Authorization: Bearer <你的 BRIDGE_TOKEN>`
 3. Connect → List Tools → 调用 `cursor_whoami`
 
-## 部署
+## Docker / VPS 部署
+
+适合自有 VPS、内网或希望完全自控密钥与流量的场景。
+
+### 快速启动
+
+```bash
+cp .env.example .env
+# 编辑 .env: BRIDGE_TOKEN(openssl rand -hex 32)、CURSOR_API_KEY
+docker compose up -d --build
+```
+
+默认映射 **`http://<VPS>:8792/mcp`**。健康检查:`GET /health`。
+
+### 不用 Compose 时
+
+```bash
+docker build -t cursor-mcp-bridge .
+docker run -d --name cursor-mcp-bridge -p 8792:8792 \
+  -e BRIDGE_TOKEN='...' \
+  -e CURSOR_API_KEY='...' \
+  cursor-mcp-bridge
+```
+
+### 本地 Node(不装 Docker)
+
+```bash
+cp .env.example .env   # 或 export 环境变量
+npm install
+npm run dev:node       # 开发热重载,默认 :8792
+# 生产:
+npm run build:node && npm run start:node
+```
+
+建议在 VPS 前加 **Caddy / Nginx** 做 HTTPS( claude.ai 连接器需要公网 HTTPS URL )。示例(Caddy):
+
+```text
+mcp.example.com {
+  reverse_proxy 127.0.0.1:8792
+}
+```
+
+claude.ai 连接器 URL:`https://mcp.example.com/mcp`,Header 仍为 `Authorization: Bearer <BRIDGE_TOKEN>`。
+
+### Docker 与 Workers 差异
+
+- 密钥通过 **环境变量** 注入,不再使用 `wrangler secret`。
+- 创建 Agent **频率限制** 为进程内计数(单容器有效);多副本部署时各副本独立计数,或在前置反代层限流。
+- Workers 侧仍使用 Cache API 做近似全局限流(按 PoP)。
+
+## Cloudflare Workers 部署
 
 ```bash
 npm run deploy
@@ -98,7 +155,7 @@ bash scripts/smoke-test.sh
 | **产物列表为空** | Agent 必须把文件写到 **`/opt/cursor/artifacts/`**,不是工作目录下的 `artifacts/` |
 | **下载 400 validation_error** | `path` 必须带 **`artifacts/`** 前缀 |
 | **预签名 URL 过期** | 约 **15 分钟**;需重新 `cursor_get_artifact` |
-| **创建频率限制** | Worker 侧按分钟限制创建次数(默认 5);基于 Cache API,非全球强一致。建议在 Cursor 控制台设置用量上限 |
+| **创建频率限制** | 默认每分钟 5 次;Workers 用 Cache,Docker 用内存(单实例)。建议在 Cursor 控制台设置用量上限 |
 
 ## 安全建议
 

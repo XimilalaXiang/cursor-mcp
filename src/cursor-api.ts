@@ -1,4 +1,4 @@
-import { CURSOR_API_BASE } from "./util";
+import { CURSOR_API_BASE } from "./util.js";
 
 export class CursorApiError extends Error {
   readonly status: number;

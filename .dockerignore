@@ -1,0 +1,9 @@
+node_modules
+.wrangler
+dist
+.git
+.dev.vars
+.env
+*.md
+tmp-mcp
+agent-tools
