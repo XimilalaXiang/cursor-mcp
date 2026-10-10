@@ -59,6 +59,19 @@ function withAppliedModel<T extends Record<string, unknown>>(
   };
 }
 
+function dryRunModelResult(selection: ResolvedModelSelection | undefined): Record<string, unknown> {
+  return {
+    dry_run: true,
+    ...(selection
+      ? {
+          applied_model: selection.applied_model,
+          applied_params: selection.applied_params,
+          ...(selection.applied_notes?.length ? { applied_notes: selection.applied_notes } : {}),
+        }
+      : {}),
+  };
+}
+
 async function resolveOptionalModel(
   client: CursorClient,
   input: UnifiedModelInput,
@@ -156,11 +169,17 @@ function registerTools(server: McpServer, env: Env) {
     {
       description:
         "创建 Cloud Agent 并启动首轮 run。无 repos 为无仓库任务；产物需写入 /opt/cursor/artifacts/。 " +
+        "dry_run=true 仅解析模型参数，不调用 API、不产生费用。 " +
         CLOUD_AGENT_SAFETY_NOTICE,
       inputSchema: {
         prompt: z.string().min(1),
         name: z.string().max(100).optional(),
         ...unifiedModelFields,
+        dry_run: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("true 时仅校验/解析 model 参数，不创建 Agent。"),
         mode: z.enum(["agent", "plan"]).optional(),
         images: z.array(imageSchema).max(5).optional(),
         repos: z.array(repoSchema).max(20).optional(),
@@ -173,12 +192,16 @@ function registerTools(server: McpServer, env: Env) {
     },
     async (input) =>
       handle(async () => {
+        const modelSelection = await resolveOptionalModel(client, input);
+        if (input.dry_run) {
+          return dryRunModelResult(modelSelection);
+        }
+
         const rate = await checkCreateAgentRateLimit(env);
         if (!rate.allowed) {
           throw new CursorApiError(429, "rate_limit_exceeded", rate.note ?? "Rate limit exceeded");
         }
 
-        const modelSelection = await resolveOptionalModel(client, input);
         const modelPayload = buildModelPayload(modelSelection);
 
         const agentId = input.agent_id ?? newAgentId();
@@ -232,11 +255,17 @@ function registerTools(server: McpServer, env: Env) {
     {
       description:
         "向已有 Agent 发送追问。同一 Agent 仅一个活动 run；忙时先 wait 或 cancel。 " +
+        "dry_run=true 仅解析模型参数，不调用 API、不产生费用。 " +
         CLOUD_AGENT_SAFETY_NOTICE,
       inputSchema: {
         agent_id: z.string().min(1),
         prompt: z.string().min(1),
         ...unifiedModelFields,
+        dry_run: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe("true 时仅校验/解析 model 参数，不发送追问。"),
         mode: z.enum(["agent", "plan"]).optional(),
         images: z.array(imageSchema).max(5).optional(),
         append_delivery_rules: z.boolean().optional().default(true),
@@ -245,6 +274,10 @@ function registerTools(server: McpServer, env: Env) {
     async (input) =>
       handle(async () => {
         const modelSelection = await resolveOptionalModel(client, input);
+        if (input.dry_run) {
+          return dryRunModelResult(modelSelection);
+        }
+
         const modelPayload = buildModelPayload(modelSelection);
 
         const body: Record<string, unknown> = {
