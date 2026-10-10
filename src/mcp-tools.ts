@@ -2,6 +2,16 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { CursorApiError, CursorClient, cursorErrorPayload } from "./cursor-api.js";
 import {
+  buildModelPayload,
+  formatGetModelText,
+  formatListModelsText,
+  loadModelsCatalog,
+  resolveModelSelection,
+  textToolResult,
+  type ResolvedModelSelection,
+  type UnifiedModelInput,
+} from "./models.js";
+import {
   CLOUD_AGENT_SAFETY_NOTICE,
   UNTRUSTED_CONTENT_NOTICE,
   checkCreateAgentRateLimit,
@@ -13,6 +23,49 @@ import {
   prependDeliveryRules,
   sleep,
 } from "./util.js";
+
+const unifiedEffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
+const modelParamsSchema = z.array(
+  z.object({
+    id: z.string().min(1),
+    value: z.string(),
+  }),
+);
+
+const unifiedModelFields = {
+  model: z
+    .string()
+    .optional()
+    .describe(
+      "别名或完整 id。别名：auto/opus/gpt/fable/composer/grok/gemini/sonnet 等。通常不必传，默认 Auto。",
+    ),
+  effort: unifiedEffortSchema.optional(),
+  fast: z.boolean().optional(),
+  context: z.enum(["default", "max"]).optional(),
+  thinking: z.boolean().optional(),
+  model_params: modelParamsSchema.optional().describe("高级：原始 {id,value} 数组，优先级高于统一字段。"),
+};
+
+function withAppliedModel<T extends Record<string, unknown>>(
+  result: T,
+  selection: ResolvedModelSelection | undefined,
+): T {
+  if (!selection) return result;
+  return {
+    ...result,
+    applied_model: selection.applied_model,
+    applied_params: selection.applied_params,
+  };
+}
+
+async function resolveOptionalModel(
+  client: CursorClient,
+  input: UnifiedModelInput,
+): Promise<ResolvedModelSelection | undefined> {
+  if (!input.model?.trim()) return undefined;
+  const catalog = await loadModelsCatalog(client);
+  return resolveModelSelection(catalog, input);
+}
 
 const imageSchema = z.union([
   z.object({ url: z.string().url() }),
@@ -53,27 +106,60 @@ function registerTools(server: McpServer, env: Env) {
     "cursor_list_models",
     {
       description:
-        "List models available for Cloud Agents (GET /v1/models). " +
-        UNTRUSTED_CONTENT_NOTICE,
-      inputSchema: {},
+        "紧凑模型目录（默认仅各家族最新版）。一般不必调用；创建 Agent 时用 model 别名即可。",
+      inputSchema: {
+        include_legacy: z.boolean().optional().default(false),
+        query: z.string().optional().describe("按名称/厂商过滤，如 claude、gpt。"),
+      },
     },
-    async () => handle(() => client.get("/v1/models")),
+    async (input) => {
+      try {
+        const catalog = await loadModelsCatalog(client);
+        const text = formatListModelsText(catalog, {
+          includeLegacy: input.include_legacy,
+          query: input.query,
+        });
+        return textToolResult(text);
+      } catch (error) {
+        return jsonToolResult(cursorErrorPayload(error));
+      }
+    },
+  );
+
+  server.registerTool(
+    "cursor_get_model",
+    {
+      description: "单个模型的参数定义与默认值。需要 variants 时设 include_variants=true。",
+      inputSchema: {
+        id_or_alias: z.string().min(1),
+        include_variants: z.boolean().optional().default(false),
+      },
+    },
+    async (input) => {
+      try {
+        const catalog = await loadModelsCatalog(client);
+        const text = formatGetModelText(
+          catalog,
+          input.id_or_alias,
+          input.include_variants,
+        );
+        return textToolResult(text);
+      } catch (error) {
+        return jsonToolResult(cursorErrorPayload(error));
+      }
+    },
   );
 
   server.registerTool(
     "cursor_create_agent",
     {
       description:
-        "Create a Cursor Cloud Agent and enqueue its initial run (POST /v1/agents). " +
-        "Omit repos for a no-repo agent (research, documents, PDFs, etc.). " +
-        "Deliverables must be written under /opt/cursor/artifacts/ (see delivery rules prepended to the prompt). " +
-        CLOUD_AGENT_SAFETY_NOTICE +
-        " " +
-        UNTRUSTED_CONTENT_NOTICE,
+        "创建 Cloud Agent 并启动首轮 run。无 repos 为无仓库任务；产物需写入 /opt/cursor/artifacts/。 " +
+        CLOUD_AGENT_SAFETY_NOTICE,
       inputSchema: {
         prompt: z.string().min(1),
         name: z.string().max(100).optional(),
-        model: z.string().optional(),
+        ...unifiedModelFields,
         mode: z.enum(["agent", "plan"]).optional(),
         images: z.array(imageSchema).max(5).optional(),
         repos: z.array(repoSchema).max(20).optional(),
@@ -91,6 +177,9 @@ function registerTools(server: McpServer, env: Env) {
           throw new CursorApiError(429, "rate_limit_exceeded", rate.note ?? "Rate limit exceeded");
         }
 
+        const modelSelection = await resolveOptionalModel(client, input);
+        const modelPayload = buildModelPayload(modelSelection);
+
         const agentId = input.agent_id ?? newAgentId();
         const body: Record<string, unknown> = {
           agentId,
@@ -105,14 +194,15 @@ function registerTools(server: McpServer, env: Env) {
         };
         if (input.name) body.name = input.name;
         if (input.mode) body.mode = input.mode;
-        if (input.model) body.model = { id: input.model };
+        if (modelPayload) body.model = modelPayload;
         if (input.repos?.length) body.repos = input.repos;
 
         try {
-          return await client.post<{ agent: Record<string, unknown>; run: Record<string, unknown> }>(
-            "/v1/agents",
-            body,
-          );
+          const result = await client.post<{
+            agent: Record<string, unknown>;
+            run: Record<string, unknown>;
+          }>("/v1/agents", body);
+          return withAppliedModel(result, modelSelection);
         } catch (error) {
           if (
             error instanceof CursorApiError &&
@@ -129,7 +219,7 @@ function registerTools(server: McpServer, env: Env) {
                   `/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(latestRunId)}`,
                 )
               : null;
-            return { agent, run, idempotent: true };
+            return withAppliedModel({ agent, run, idempotent: true }, modelSelection);
           }
           throw error;
         }
@@ -140,14 +230,12 @@ function registerTools(server: McpServer, env: Env) {
     "cursor_send_followup",
     {
       description:
-        "Send a follow-up prompt to an existing agent (POST /v1/agents/{id}/runs). " +
-        "Only one active run per agent; 409 agent_busy if a run is still CREATING/RUNNING. " +
-        CLOUD_AGENT_SAFETY_NOTICE +
-        " " +
-        UNTRUSTED_CONTENT_NOTICE,
+        "向已有 Agent 发送追问。同一 Agent 仅一个活动 run；忙时先 wait 或 cancel。 " +
+        CLOUD_AGENT_SAFETY_NOTICE,
       inputSchema: {
         agent_id: z.string().min(1),
         prompt: z.string().min(1),
+        ...unifiedModelFields,
         mode: z.enum(["agent", "plan"]).optional(),
         images: z.array(imageSchema).max(5).optional(),
         append_delivery_rules: z.boolean().optional().default(true),
@@ -155,6 +243,9 @@ function registerTools(server: McpServer, env: Env) {
     },
     async (input) =>
       handle(async () => {
+        const modelSelection = await resolveOptionalModel(client, input);
+        const modelPayload = buildModelPayload(modelSelection);
+
         const body: Record<string, unknown> = {
           prompt: {
             text: prependDeliveryRules(
@@ -166,12 +257,14 @@ function registerTools(server: McpServer, env: Env) {
           },
         };
         if (input.mode) body.mode = input.mode;
+        if (modelPayload) body.model = modelPayload;
 
         try {
-          return await client.post<{ run: Record<string, unknown> }>(
+          const result = await client.post<{ run: Record<string, unknown> }>(
             `/v1/agents/${encodeURIComponent(input.agent_id)}/runs`,
             body,
           );
+          return withAppliedModel(result, modelSelection);
         } catch (error) {
           if (error instanceof CursorApiError && error.code === "agent_busy") {
             throw new CursorApiError(
