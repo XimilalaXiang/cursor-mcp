@@ -1,0 +1,9 @@
+# Copy to .dev.vars for local development (never commit .dev.vars)
+# Generate bridge token: openssl rand -hex 32
+BRIDGE_TOKEN=your-bridge-token-at-least-32-bytes-random
+CURSOR_API_KEY=your-cursor-user-or-service-account-api-key
+
+# Optional overrides
+# CREATE_AGENT_RATE_LIMIT_PER_MINUTE=5
+# CURSOR_REQUEST_TIMEOUT_MS=30000
+# DELIVERY_RULES=custom delivery rules prepended to agent prompts

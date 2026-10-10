@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cursor-cloud-agents-mcp-bridge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "CREATE_AGENT_RATE_LIMIT_PER_MINUTE": "5",
+    "CURSOR_REQUEST_TIMEOUT_MS": "30000"
+  }
+}
