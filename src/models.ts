@@ -251,7 +251,7 @@ export class ModelsCatalog {
     if (!q) return [];
 
     const aliases = this.defaultListPrimaryAliases();
-    return aliases
+    const ranked = aliases
       .map((alias) => {
         const lower = alias.toLowerCase();
         const prefixBoost =
@@ -267,10 +267,28 @@ export class ModelsCatalog {
           a.prefixBoost - b.prefixBoost ||
           a.dist - b.dist ||
           a.alias.localeCompare(b.alias),
-      )
-      .slice(0, limit)
-      .map((x) => x.alias);
+      );
+
+    const maxDist = Math.max(2, Math.min(4, Math.ceil(q.length / 3)));
+    const close = ranked.filter(
+      (x) => x.prefixBoost === 0 || (x.prefixBoost === 1 && x.dist <= maxDist) || x.dist <= 2,
+    );
+    if (!close.length) return [];
+
+    const best = close[0];
+    if (best.prefixBoost > 1 || best.dist > maxDist) {
+      return [];
+    }
+
+    return close.slice(0, limit).map((x) => x.alias);
   }
+}
+
+export function formatUnknownModelMessage(catalog: ModelsCatalog, query: string): string {
+  const near = catalog.nearestAliases(query);
+  return near.length
+    ? `未知模型：${query}。相近：${near.join(", ")}`
+    : `未知模型：${query}。无相近项`;
 }
 
 function levenshtein(a: string, b: string): number {
@@ -481,20 +499,34 @@ function applyUnifiedFields(
       if (!effortValuesEquivalent(input.effort, picked, model, paramId)) {
         notes.push(`effort 请求 ${input.effort}，实际 ${picked}`);
       }
+    } else {
+      notes.push(`${model.id} 不支持 effort，已忽略`);
     }
   }
-  if (input.fast !== undefined && paramValues(model, "fast").length) {
-    userSpecified.add("fast");
-    params.set("fast", input.fast ? "true" : "false");
+  if (input.fast !== undefined) {
+    if (paramValues(model, "fast").length) {
+      userSpecified.add("fast");
+      params.set("fast", input.fast ? "true" : "false");
+    } else {
+      notes.push(`${model.id} 不支持 fast，已忽略`);
+    }
   }
-  if (input.context && paramValues(model, "context").length) {
-    userSpecified.add("context");
-    const value = pickContextValue(model, input.context);
-    if (value) params.set("context", value);
+  if (input.context) {
+    if (paramValues(model, "context").length) {
+      userSpecified.add("context");
+      const value = pickContextValue(model, input.context);
+      if (value) params.set("context", value);
+    } else {
+      notes.push(`${model.id} 不支持 context，已忽略`);
+    }
   }
-  if (input.thinking !== undefined && paramValues(model, "thinking").length) {
-    userSpecified.add("thinking");
-    params.set("thinking", input.thinking ? "true" : "false");
+  if (input.thinking !== undefined) {
+    if (paramValues(model, "thinking").length) {
+      userSpecified.add("thinking");
+      params.set("thinking", input.thinking ? "true" : "false");
+    } else {
+      notes.push(`${model.id} 不支持 thinking，已忽略`);
+    }
   }
 
   return notes;
@@ -522,13 +554,10 @@ export function resolveModelSelection(
 
   const resolvedId = catalog.resolveId(input.model);
   if (!resolvedId) {
-    const near = catalog.nearestAliases(input.model);
     throw new CursorApiError(
       400,
       "model_not_found",
-      near.length
-        ? `未知模型：${input.model}。相近：${near.join(", ")}`
-        : `未知模型：${input.model}`,
+      formatUnknownModelMessage(catalog, input.model),
     );
   }
 
@@ -578,10 +607,7 @@ export function formatGetModelText(
 ): string {
   const resolvedId = catalog.resolveId(idOrAlias);
   if (!resolvedId) {
-    const near = catalog.nearestAliases(idOrAlias);
-    return near.length
-      ? `未知模型：${idOrAlias}。相近：${near.join(", ")}`
-      : `未知模型：${idOrAlias}`;
+    return formatUnknownModelMessage(catalog, idOrAlias);
   }
 
   const model = catalog.byId.get(resolvedId)!;
