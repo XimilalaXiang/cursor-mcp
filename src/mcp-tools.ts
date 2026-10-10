@@ -55,6 +55,7 @@ function withAppliedModel<T extends Record<string, unknown>>(
     ...result,
     applied_model: selection.applied_model,
     applied_params: selection.applied_params,
+    ...(selection.applied_notes?.length ? { applied_notes: selection.applied_notes } : {}),
   };
 }
 
@@ -119,7 +120,7 @@ function registerTools(server: McpServer, env: Env) {
           includeLegacy: input.include_legacy,
           query: input.query,
         });
-        return textToolResult(text);
+        return textToolResult(text, env);
       } catch (error) {
         return jsonToolResult(cursorErrorPayload(error));
       }
@@ -143,7 +144,7 @@ function registerTools(server: McpServer, env: Env) {
           input.id_or_alias,
           input.include_variants,
         );
-        return textToolResult(text);
+        return textToolResult(text, env);
       } catch (error) {
         return jsonToolResult(cursorErrorPayload(error));
       }
@@ -515,7 +516,26 @@ function registerTools(server: McpServer, env: Env) {
       },
     },
     async ({ agent_id, run_id, max_seconds }) =>
-      handle(() => client.streamRunEvents(agent_id, run_id, max_seconds * 1000)),
+      handle(async () => {
+        const run = await client.get<Record<string, unknown>>(
+          `/v1/agents/${encodeURIComponent(agent_id)}/runs/${encodeURIComponent(run_id)}`,
+        );
+        const status = typeof run.status === "string" ? run.status : "";
+        const stream = await client.streamRunEvents(agent_id, run_id, max_seconds * 1000);
+
+        if (isTerminalRunStatus(status) && stream.events.length === 0) {
+          return {
+            events: [],
+            truncated: false,
+            message: "run 已结束，无实时事件",
+          };
+        }
+
+        return {
+          events: stream.events,
+          truncated: stream.truncated,
+        };
+      }),
   );
 }
 

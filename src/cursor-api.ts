@@ -125,7 +125,7 @@ export class CursorClient {
     return this.request<T>(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: JSON.stringify(body ?? {}),
     });
   }
 
@@ -136,12 +136,14 @@ export class CursorClient {
   ): Promise<{
     events: Array<{ type: string; summary: string }>;
     truncated: boolean;
+    timedOut: boolean;
   }> {
     const url = `${CURSOR_API_BASE}/v1/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/stream`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), maxMs);
 
     const events: Array<{ type: string; summary: string }> = [];
+    let timedOut = false;
     try {
       const response = await fetch(url, {
         method: "GET",
@@ -205,14 +207,16 @@ export class CursorClient {
         }
       }
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        timedOut = true;
+      } else {
         throw error;
       }
     } finally {
       clearTimeout(timeout);
     }
 
-    return { events, truncated: true };
+    return { events, truncated: timedOut, timedOut };
   }
 }
 

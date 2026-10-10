@@ -16,7 +16,16 @@ export function loadEnvFromProcess(): Env {
       process.env.CREATE_AGENT_RATE_LIMIT_PER_MINUTE,
     CURSOR_REQUEST_TIMEOUT_MS: process.env.CURSOR_REQUEST_TIMEOUT_MS,
     DELIVERY_RULES: process.env.DELIVERY_RULES,
+    CURSOR_MCP_MAX_CHARS: process.env.CURSOR_MCP_MAX_CHARS,
   };
+}
+
+export function resolveTextOutputLimit(env: Env): number {
+  const parsed = parseInt(env.CURSOR_MCP_MAX_CHARS ?? "6000", 10);
+  if (!Number.isFinite(parsed) || parsed < 100) {
+    return 6000;
+  }
+  return parsed;
 }
 
 export function resolveListenPort(): number {

@@ -1,6 +1,7 @@
 import { CursorApiError, CursorClient } from "./cursor-api.js";
+import { resolveTextOutputLimit } from "./config.js";
 
-export const TEXT_OUTPUT_LIMIT = 6000;
+export const DEFAULT_TEXT_OUTPUT_LIMIT = 6000;
 export const TRUNCATE_HINT = "[已截断，使用 cursor_get_model 查看详情]";
 
 export type UnifiedEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -40,11 +41,18 @@ export interface UnifiedModelInput {
   model_params?: ModelParamKV[];
 }
 
+export interface AppliedParamEntry {
+  id: string;
+  value: string;
+  source: "user" | "default";
+}
+
 export interface ResolvedModelSelection {
   id: string;
   params: ModelParamKV[];
   applied_model: string;
-  applied_params: ModelParamKV[];
+  applied_params: AppliedParamEntry[];
+  applied_notes?: string[];
 }
 
 const MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -70,15 +78,16 @@ export function stripZeroWidth(text: string): string {
   return text.replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
-export function truncateToolText(text: string, max = TEXT_OUTPUT_LIMIT): string {
+export function truncateToolText(text: string, max = DEFAULT_TEXT_OUTPUT_LIMIT): string {
   if (text.length <= max) return text;
   const budget = max - TRUNCATE_HINT.length;
   return text.slice(0, Math.max(0, budget)) + TRUNCATE_HINT;
 }
 
-export function textToolResult(text: string) {
+export function textToolResult(text: string, env?: Env) {
+  const max = env ? resolveTextOutputLimit(env) : DEFAULT_TEXT_OUTPUT_LIMIT;
   return {
-    content: [{ type: "text" as const, text: truncateToolText(text) }],
+    content: [{ type: "text" as const, text: truncateToolText(text, max) }],
   };
 }
 
@@ -229,12 +238,36 @@ export class ModelsCatalog {
     return [...new Set(out)].sort();
   }
 
+  /** Primary alias column from default `list_models` output (one per latest family). */
+  defaultListPrimaryAliases(): string[] {
+    return this.listForDisplay({ includeLegacy: false }).map((model) => {
+      const aliases = this.aliasesForModel(model.id);
+      return aliases[0] ?? model.id;
+    });
+  }
+
   nearestAliases(query: string, limit = 3): string[] {
-    const q = query.toLowerCase();
-    const aliases = [...this.latestAliases.keys()];
+    const q = stripZeroWidth(query).trim().toLowerCase();
+    if (!q) return [];
+
+    const aliases = this.defaultListPrimaryAliases();
     return aliases
-      .map((alias) => ({ alias, dist: levenshtein(q, alias) }))
-      .sort((a, b) => a.dist - b.dist)
+      .map((alias) => {
+        const lower = alias.toLowerCase();
+        const prefixBoost =
+          lower.startsWith(q) || q.startsWith(lower)
+            ? 0
+            : lower.includes(q) || q.includes(lower)
+              ? 1
+              : 2;
+        return { alias, dist: levenshtein(q, lower), prefixBoost };
+      })
+      .sort(
+        (a, b) =>
+          a.prefixBoost - b.prefixBoost ||
+          a.dist - b.dist ||
+          a.alias.localeCompare(b.alias),
+      )
       .slice(0, limit)
       .map((x) => x.alias);
   }
@@ -406,27 +439,65 @@ function effortParamId(model: CursorModelItem): string | undefined {
   return undefined;
 }
 
+function mapEffortToParamValue(
+  model: CursorModelItem,
+  paramId: string,
+  requested: UnifiedEffort,
+): string {
+  if (paramId === "reasoning" && model.id === "gpt-5.5" && requested === "xhigh") {
+    return "extra-high";
+  }
+  return requested;
+}
+
+function effortValuesEquivalent(
+  requested: UnifiedEffort,
+  actual: string,
+  model: CursorModelItem,
+  paramId: string,
+): boolean {
+  const ideal = mapEffortToParamValue(model, paramId, requested);
+  if (actual === ideal) return true;
+  if (model.id === "gpt-5.5" && paramId === "reasoning" && requested === "xhigh") {
+    return actual === "extra-high";
+  }
+  return false;
+}
+
 function applyUnifiedFields(
   model: CursorModelItem,
   params: Map<string, string>,
   input: UnifiedModelInput,
-): void {
+  userSpecified: Set<string>,
+): string[] {
+  const notes: string[] = [];
+
   if (input.effort) {
     const paramId = effortParamId(model);
     if (paramId) {
-      params.set(paramId, pickEffortValue(model, paramId, input.effort));
+      userSpecified.add(paramId);
+      const picked = pickEffortValue(model, paramId, input.effort);
+      params.set(paramId, picked);
+      if (!effortValuesEquivalent(input.effort, picked, model, paramId)) {
+        notes.push(`effort 请求 ${input.effort}，实际 ${picked}`);
+      }
     }
   }
   if (input.fast !== undefined && paramValues(model, "fast").length) {
+    userSpecified.add("fast");
     params.set("fast", input.fast ? "true" : "false");
   }
   if (input.context && paramValues(model, "context").length) {
+    userSpecified.add("context");
     const value = pickContextValue(model, input.context);
     if (value) params.set("context", value);
   }
   if (input.thinking !== undefined && paramValues(model, "thinking").length) {
+    userSpecified.add("thinking");
     params.set("thinking", input.thinking ? "true" : "false");
   }
+
+  return notes;
 }
 
 function validateExplicitParams(model: CursorModelItem, params: ModelParamKV[]): void {
@@ -468,6 +539,8 @@ export function resolveModelSelection(
 
   const variant = defaultVariant(model);
   const params = new Map<string, string>();
+  const userSpecified = new Set<string>();
+
   for (const p of variant?.params ?? []) {
     params.set(p.id, stripZeroWidth(p.value));
   }
@@ -476,17 +549,25 @@ export function resolveModelSelection(
     validateExplicitParams(model, input.model_params);
     for (const p of input.model_params) {
       params.set(p.id, stripZeroWidth(p.value));
+      userSpecified.add(p.id);
     }
   }
 
-  applyUnifiedFields(model, params, input);
+  const notes = applyUnifiedFields(model, params, input, userSpecified);
 
-  const applied_params = [...params.entries()].map(([id, value]) => ({ id, value }));
+  const plainParams = [...params.entries()].map(([id, value]) => ({ id, value }));
+  const applied_params: AppliedParamEntry[] = plainParams.map(({ id, value }) => ({
+    id,
+    value,
+    source: userSpecified.has(id) ? "user" : "default",
+  }));
+
   return {
     id: model.id,
-    params: applied_params,
+    params: plainParams,
     applied_model: model.id,
     applied_params,
+    ...(notes.length ? { applied_notes: notes } : {}),
   };
 }
 
